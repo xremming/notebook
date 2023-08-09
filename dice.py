@@ -1,4 +1,4 @@
-from random import randint
+from random import randint, random
 
 
 def roll(sides: int) -> int:
@@ -24,3 +24,9 @@ def pool(size: int, sides: int, target: int) -> int:
     that meet or exceed `target`."""
 
     return sum(i >= target for i in rolln(size, sides))
+
+
+def toss(chance: float = 0.5) -> bool:
+    """Toss a coin with `chance` probability of heads."""
+
+    return random() < chance
