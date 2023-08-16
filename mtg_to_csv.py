@@ -3,8 +3,73 @@ import fileinput
 import json
 import logging
 from typing import Literal
+from uuid import UUID
 
+from pydantic import BaseModel, Field, ValidationError
 from tqdm import tqdm
+
+# these layouts always have the `card_faces` property
+LayoutCardFaces = Literal["split", "flip", "transform", "double_faced_token"]
+
+Layout = Literal[
+    "adventure",
+    "art_series",
+    "augment",
+    # documentation is wrong about battles
+    # "battle",
+    "class",
+    "double_faced_token",
+    "emblem",
+    "flip",
+    "host",
+    "leveler",
+    "meld",
+    "modal_dfc",
+    "mutate",
+    "normal",
+    "planar",
+    "prototype",
+    "reversible_card",
+    "saga",
+    "scheme",
+    "split",
+    "token",
+    "transform",
+    "vanguard",
+]
+
+# TODO: get each "side" of a card from a Card object
+# TODO: get "visually distinct layouts" from CardSide
+# TODO: get "type1" and "type2" from CardSide
+
+
+class CardFace(BaseModel):
+    object: Literal["card_face"]
+
+    name: str
+    printed_name: str | None
+
+    colors: list[str] | None
+    layout: Layout | None
+    type_line: str | None
+
+
+class Card(BaseModel):
+    object: Literal["card"]
+
+    oracle_id: UUID
+    lang: str
+
+    name: str
+    flavor_name: str | None
+    printed_name: str | None
+
+    set_code: str = Field(alias="set")
+    set_type: str
+
+    layout: Layout
+
+    card_faces: list[CardFace] | None
 
 
 def parse_colors(colors: list[str]) -> str:
@@ -20,7 +85,7 @@ def parse_colors(colors: list[str]) -> str:
 playtest_sets = {"cmb1", "cmb2"}
 
 
-type_ = Literal[
+type1 = Literal[
     "artifact",
     "conspiracy",
     "creature",
@@ -35,6 +100,41 @@ type_ = Literal[
     "adventure",
     "emblem",
 ]
+
+type1_mapping: dict[frozenset[str], type1] = {
+    frozenset(["creature", "enchantment"]): "creature"
+}
+
+
+def get_types(type_line: str) -> tuple[set[str], set[str]]:
+    """
+    Parse type line into two sets, first one containing the types on the left of
+    `—` and the other containing the types on the right side of it.
+    """
+
+    lhs = set()
+    rhs = set()
+    for part in type_line.lower().split("//"):
+        part = part.strip()
+        parts = part.split("—")
+
+        # no type line
+        if len(parts) == 0:
+            continue
+
+        # only lhs type
+        elif len(parts) == 1:
+            lhs.update(parts[0].split())
+
+        # lhs and rhs types
+        elif len(parts) == 2:
+            lhs.update(parts[0].split())
+            rhs.update(parts[1].split())
+
+        else:
+            raise ValueError(f"type_line with more than two parts: {type_line!r}")
+
+    return lhs, rhs
 
 
 types = {
@@ -180,11 +280,11 @@ with open("data/mtg.csv", "w") as fp:
         except json.JSONDecodeError:
             logging.info(f"failed to decode line as JSON document: {line!r}")
             continue
-        else:
-            try:
-                out.writerows(get_rows(data))
-            except KeyError:
-                from pprint import pprint
 
-                pprint(data)
-                raise
+        try:
+            card = Card(**data)
+        except ValidationError:
+            id_ = data.get("id")
+            name = data.get("name")
+            logging.error(f"failed to validate card: {name!r} ({id_})")
+            continue
