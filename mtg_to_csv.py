@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+from pathlib import PurePath
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 from tqdm import tqdm
 
+Color = Literal["W", "U", "B", "R", "G"]
+Frame = Literal["1993", "1997", "2003", "2015", "future"]
+ImageStatus = Literal["missing", "placeholder", "lowres", "highres_scan"]
 Layout = Literal[
     "adventure",
     "art_series",
@@ -42,10 +48,6 @@ NormalizedLayout = Literal[
     "class",
     "token",  # combines token and double_faced_token
 ]
-
-Frame = Literal["1993", "1997", "2003", "2015", "future"]
-
-ImageStatus = Literal["missing", "placeholder", "lowres", "highres_scan"]
 
 
 class ImageURIs(BaseModel):
@@ -91,13 +93,22 @@ class PhysicalCard(BaseModel):
     layout: Layout
     frame: Frame
     type_line: str
-    colors: list[str]
+    colors: list[Color]
     image_uris: ImageURIs
 
-    @staticmethod
-    def parse_type_line(type_line: str) -> tuple[str, str]:
+    @property
+    def preferred_filename(self) -> str:
+        small_image = self.image_uris.small
+        url = urlparse(small_image)
+        p = PurePath(url.path)
+        digest = hashlib.md5(small_image.encode(), usedforsecurity=False).hexdigest()
+
+        return f"{digest}{p.suffix}"
+
+    @property
+    def parsed_type_line(self) -> tuple[str, str]:
         lhs, rhs = set(), set()
-        for part in type_line.lower().split("//"):
+        for part in self.type_line.lower().split("//"):
             part = part.strip()
             parts = part.split("—")
 
@@ -115,7 +126,9 @@ class PhysicalCard(BaseModel):
                 rhs.update(parts[1].split())
 
             else:
-                raise ValueError(f"type_line with more than two parts: {type_line!r}")
+                raise ValueError(
+                    f"type_line with more than two parts: {self.type_line!r}"
+                )
 
         # Atinlay Igpay is a creature - pig
         # but its type line is just written with pig latin
@@ -127,6 +140,12 @@ class PhysicalCard(BaseModel):
         if "igpay" in rhs:
             rhs.remove("igpay")
             rhs.add("pig")
+
+        if not lhs:
+            lhs.add("[none]")
+
+        if not rhs:
+            rhs.add("[none]")
 
         return " ".join(sorted(lhs)), " ".join(sorted(rhs))
 
@@ -186,6 +205,14 @@ class PhysicalCard(BaseModel):
 
         raise RuntimeError(f"unknown physical kind: {self!r} {type1!r}")
 
+    @property
+    def parsed_colors(self) -> str:
+        color = "".join(sorted(self.colors))
+        if not color:
+            return "c"
+
+        return color.lower()
+
     @classmethod
     def header(cls):
         return [
@@ -199,10 +226,11 @@ class PhysicalCard(BaseModel):
             "Type2",
             "Colors",
             "Image URL",
+            "Image Filename",
         ]
 
     def row(self):
-        type1, type2 = self.parse_type_line(self.type_line)
+        type1, type2 = self.parsed_type_line
 
         return [
             self.oracle_id,
@@ -213,12 +241,10 @@ class PhysicalCard(BaseModel):
             self.physical_kind(type1),
             type1,
             type2,
-            parse_colors(self.colors),
+            self.parsed_colors,
             self.image_uris.small,
+            self.preferred_filename,
         ]
-
-
-Color = Literal["W", "U", "B", "R", "G"]
 
 
 class CardFace(BaseModel):
@@ -227,7 +253,7 @@ class CardFace(BaseModel):
     name: str
     printed_name: str | None
 
-    colors: list[str] | None
+    colors: list[Color] | None
     layout: Layout | None
     type_line: str | None
 
@@ -299,203 +325,6 @@ class Card(BaseModel):
             return [c.physical_card(self) for c in self.card_faces]
 
         return [PhysicalCard(**self.dict())]
-
-
-def parse_colors(colors: list[str]) -> str:
-    color = "".join(sorted(colors))
-    if not color:
-        return "C"
-
-    return color
-
-
-# playtest sets have a visually very distinct look and
-# some cards there have other weird types
-playtest_sets = {"cmb1", "cmb2"}
-
-
-type1 = Literal[
-    "artifact",
-    "conspiracy",
-    "creature",
-    "dungeon",
-    "enchantment",
-    "instant",
-    "land",
-    "planeswalker",
-    "sorcery",
-    # layouts
-    "token",
-    "adventure",
-    "emblem",
-]
-
-type1_mapping: dict[frozenset[str], type1] = {
-    frozenset(["creature", "enchantment"]): "creature"
-}
-
-
-def get_types(type_line: str) -> tuple[set[str], set[str]]:
-    """
-    Parse type line into two sets, first one containing the types on the left of
-    `—` and the other containing the types on the right side of it.
-    """
-
-    lhs = set()
-    rhs = set()
-    for part in type_line.lower().split("//"):
-        part = part.strip()
-        parts = part.split("—")
-
-        # no type line
-        if len(parts) == 0:
-            continue
-
-        # only lhs type
-        elif len(parts) == 1:
-            lhs.update(parts[0].split())
-
-        # lhs and rhs types
-        elif len(parts) == 2:
-            lhs.update(parts[0].split())
-            rhs.update(parts[1].split())
-
-        else:
-            raise ValueError(f"type_line with more than two parts: {type_line!r}")
-
-    return lhs, rhs
-
-
-types = {
-    "artifact",
-    "conspiracy",
-    "creature",
-    "dungeon",
-    "enchantment",
-    "instant",
-    "land",
-    "planeswalker",
-    "sorcery",
-}
-
-# types which should never be combined with other types
-loner_types = {"creature", "planeswalker", "land"}
-
-# layouts which are clearly visually distinct and
-# the layout is more important than the type line
-special_layouts = {
-    "split",
-    "flip",
-    "leveler",
-    "class",
-    "saga",
-    "adventure",
-    "vanguard",
-    "scheme",
-    "emblem",
-    # the type line can either be plane or phenomenon but the cards look almost the same
-    # so it is better to combine these
-    "planar",
-}
-
-skip_layouts = {"token", "double_faced_token"}
-
-
-def parse_type(data: dict, set_: str) -> str | None:
-    if set_ in playtest_sets:
-        return "playtest"
-
-    layout = data.get("layout")
-
-    if layout in special_layouts:
-        return layout
-
-    if layout in skip_layouts:
-        return None
-
-    type_line = data.get("type_line")
-    if not type_line:
-        return None
-
-    type_line_types = set()
-    for part in type_line.lower().split("//"):
-        part = part.strip()
-        parts = part.split("—")
-
-        # no type line
-        if len(parts) == 0:
-            continue
-
-        # only lhs type
-        elif len(parts) == 1:
-            type_line_types.update(parts[0].split())
-
-        # lhs and rhs types
-        elif len(parts) == 2:
-            type_line_types.update(parts[0].split())
-
-        else:
-            raise RuntimeError(f"type_line with more than three parts: {type_line!r}")
-
-    type_line_types = types & type_line_types
-    if not type_line_types:
-        return None
-
-    only_loners = type_line_types & loner_types
-    if only_loners:
-        if len(only_loners) != 1:
-            raise RuntimeError(
-                f"type_line with more than one loner type: {type_line!r}"
-            )
-        return only_loners.pop()
-
-    # planeswalkers type should always be just planeswalker
-    # if "planeswalker" in type_line_types:
-    #     return "planeswalker"
-
-    return " ".join(type_line_types)
-
-
-def get_rows(data: dict):
-    id_ = data["id"]
-    set_ = data["set"]
-
-    digital = data["digital"]
-    if digital:
-        return
-
-    # set_type = data["set_type"]
-    # if set_type == "funny":
-    #     return
-
-    image_status = data["image_status"]
-    if image_status in {"missing", "placeholder"}:
-        return
-
-    def get_name(v):
-        return v.get("printed_name") or v.get("flavor_name") or v["name"]
-
-    try:
-        name = get_name(data)
-        color = parse_colors(data["colors"])
-        type_ = parse_type(data, set_)
-        image_url = data.get("image_uris", {})["small"]
-
-        if type_:
-            yield [id_, name, color, type_, set_, image_url]
-
-    except KeyError:
-        if "card_faces" not in data:
-            raise
-
-        for card_face in data["card_faces"]:
-            name = get_name(card_face)
-            color = parse_colors(card_face["colors"])
-            type_ = parse_type(card_face, set_)
-            image_url = card_face.get("image_uris", {})["small"]
-
-            if type_:
-                yield [id_, name, color, type_, set_, image_url]
 
 
 with (
