@@ -1,22 +1,128 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol, TypeVar, overload
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Iterable,
+    NewType,
+    Optional,
+    TypeVar,
+    TypeVarTuple,
+)
 
-Entity = int
+Entity = NewType("Entity", int)
+Component = Any
+System = Callable[..., None]
+
+T = TypeVar("T")
+Cs = TypeVarTuple("Cs")
+R = TypeVar("R")
 
 
-class System(Protocol):
-    def update(self, world: World) -> None:
+class Commands:
+    def add_resource(self, resource: Component) -> None:
+        ...
+
+    def remove_resource(self, resource_type: type) -> None:
+        ...
+
+    def add_entity(self, *components: Component) -> None:
+        ...
+
+    def remove_entity(self, entity: Entity) -> None:
+        ...
+
+    def add_component(self, entity: Entity, component: Component) -> None:
+        ...
+
+    def remove_component(self, entity: Entity, component_type: type) -> None:
         ...
 
 
-T = TypeVar("T")
-R = TypeVar("R")
-C1 = TypeVar("C1")
-C2 = TypeVar("C2")
-C3 = TypeVar("C3")
-C4 = TypeVar("C4")
+# class Resource(Generic[R]):
+#     def __init__(self, resource: R):
+#         self.resource = resource
+
+#     def __call__(self) -> R:
+#         return self.resource
+
+
+class Query(Generic[*Cs]):
+    def __init__(self, world: World, query: list[QueryArg]) -> None:
+        self._world = world
+        self._query = query
+
+    def __call__(self) -> Iterable[tuple[Entity, tuple[*Cs]]]:
+        for entity in self._world.entities:
+            components = []
+            for arg in self._query:
+                component = self._world.components.get(arg.component, {}).get(entity)
+                if component is None and not arg.optional:
+                    break
+                components.append(component)
+            else:
+                yield entity, tuple(components)  # type: ignore
+
+
+@dataclass
+class ParameterCommands:
+    name: str
+
+
+@dataclass
+class ParameterResource:
+    name: str
+    component: type
+    optional: bool = False
+
+
+@dataclass
+class QueryArg:
+    component: type
+    optional: bool = False
+
+
+@dataclass
+class ParameterQuery:
+    name: str
+    args: list[QueryArg]
+
+
+Parameter = ParameterCommands | ParameterResource | ParameterQuery
+
+
+def unwrap_optional(t) -> tuple[type, bool]:
+    optional = str(t).startswith("typing.Optional")
+    if optional:
+        return t.__args__[0], True
+
+    return t, False
+
+
+def inspect_system(system: Callable[..., None]):
+    out: list[Parameter] = []
+
+    signature = inspect.signature(system, eval_str=True)
+    for name, parameter in signature.parameters.items():
+        annotation = parameter.annotation
+        print(f"{name}: {annotation}")
+
+        if annotation is Commands:
+            out.append(ParameterCommands(name))
+        elif hasattr(annotation, "__origin__") and annotation.__origin__ is Query:
+            args = []
+            for arg in annotation.__args__:
+                component, optional = unwrap_optional(arg)
+                args.append(QueryArg(component, optional))
+            out.append(ParameterQuery(name, args))
+        else:
+            component, optional = unwrap_optional(annotation)
+            out.append(ParameterResource(name, component, optional))
+
+    return out
 
 
 class World:
@@ -31,7 +137,29 @@ class World:
 
     def run(self) -> None:
         for system in self.systems:
-            system.update(self)
+            parameters = inspect_system(system)
+
+            args: dict[str, Any] = {}
+            for parameter in parameters:
+                if isinstance(parameter, ParameterCommands):
+                    args[parameter.name] = self
+
+                elif isinstance(parameter, ParameterResource):
+                    resource = self.get_resource(parameter.component)
+                    if resource is None and not parameter.optional:
+                        # systems which require a resource which is not present
+                        # are skipped
+                        break
+
+                    args[parameter.name] = resource
+
+                elif isinstance(parameter, ParameterQuery):
+                    args[parameter.name] = Query(self, parameter.args)
+
+                else:
+                    raise ValueError(f"Invalid parameter: {parameter}")
+
+            system(**args)
 
     def create_entity(self, *components: Any) -> Entity:
         entity = Entity(self._next_entity_id)
@@ -55,54 +183,8 @@ class World:
     def get_resource(self, resource_type: type[R], default: T = None) -> R | T:
         return self.resources.get(resource_type, default)
 
-    @overload
-    def query(self, c1: type[C1]) -> Iterable[tuple[Entity, tuple[C1]]]:
-        ...
 
-    @overload
-    def query(
-        self, c1: type[C1], c2: type[C2]
-    ) -> Iterable[tuple[Entity, tuple[C1, C2]]]:
-        ...
-
-    @overload
-    def query(
-        self, c1: type[C1], c2: type[C2], c3: type[C3]
-    ) -> Iterable[tuple[Entity, tuple[C1, C2, C3]]]:
-        ...
-
-    @overload
-    def query(
-        self,
-        c1: type[C1],
-        c2: type[C2],
-        c3: type[C3],
-        c4: type[C4],
-    ) -> Iterable[tuple[Entity, tuple[C1, C2, C3, C4]]]:
-        ...
-
-    def query(
-        self,
-        c1: type[C1],
-        c2: type[C2] | None = None,
-        c3: type[C3] | None = None,
-        c4: type[C4] | None = None,
-    ) -> Iterable[
-        tuple[
-            Entity,
-            tuple[C1] | tuple[C1, C2] | tuple[C1, C2, C3] | tuple[C1, C2, C3, C4],
-        ]
-    ]:
-        components = list(filter(None, (c1, c2, c3, c4)))
-        for entity in self.entities:
-            if all(
-                component_type in self.components
-                and entity in self.components[component_type]
-                for component_type in components
-            ):
-                yield entity, tuple(
-                    self.components[component][entity] for component in components
-                )
+# ---
 
 
 class Name(str):
@@ -121,30 +203,55 @@ class Velocity:
     y: float = 0.0
 
 
-@dataclass
-class PhysicsConstants:
-    gravity: float = 9.81
-    air_drag: float = 0.1
+class AirDrag(float):
+    pass
 
 
-class MovementSystem:
-    def update(self, world: World) -> None:
-        for entity, (position, velocity) in world.query(Position, Velocity):
-            position.x += velocity.x
-            position.y += velocity.y
+class MasterVolume(float):
+    pass
+
+
+class Volume(float):
+    pass
+
+
+class PlayVolume(float):
+    pass
+
+
+def apply_velocity(query: Query[Optional[Name], Position, Velocity]) -> None:
+    for _, (name, position, velocity) in query():
+        if name is not None:
+            print(f"Updating position of {name!r}.")
+        position.x += velocity.x
+        position.y += velocity.y
+
+
+def apply_air_drag(air_drag: AirDrag, query: Query[Velocity]) -> None:
+    for _, (velocity,) in query():
+        velocity.x *= air_drag
+        velocity.y *= air_drag
+
+
+def apply_volume(
+    master_volume: Optional[MasterVolume], query: Query[Optional[Volume], PlayVolume]
+) -> None:
+    for _, (volume, play_volume) in query():
+        play_volume += (volume or 1) * (master_volume or 1)
 
 
 if __name__ == "__main__":
-    w = World(MovementSystem())
+    w = World(apply_velocity, apply_air_drag, apply_volume)
 
-    w.add_resource(PhysicsConstants())
+    w.add_resource(AirDrag(0.9))
+    # w.add_resource(MasterVolume(0.5))
 
-    w.create_entity(Name("Max"), Position(), Velocity(1, 1))
-    w.create_entity(Name("Min"), Position(), Velocity(-1, -1))
+    w.create_entity(Name("Max"), Position(), Velocity(1, 1), Volume(0.5), PlayVolume())
+    w.create_entity(Position(), Velocity(-1, -1))
     w.create_entity(Name("Other"), Position())
 
     from pprint import pprint
 
     for _ in range(10):
         w.run()
-        pprint(list(w.query(Name, Position, Velocity)))
+        pprint(w.components[PlayVolume])
